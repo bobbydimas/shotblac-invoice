@@ -1,0 +1,82 @@
+/* ============================================================
+   AGENCY INVOICER — Print Stylesheet
+   Applied only when printing / exporting to PDF
+   ============================================================ */
+
+@media print {
+  /* Hide all UI chrome — only the invoice paper prints */
+  #app-nav,
+  .preview-toolbar,
+  .no-print,
+  #toast-container,
+  #modal-overlay {
+    display: none !important;
+  }
+
+  /* Reset app shell layout */
+  #app-shell {
+    display: block !important;
+  }
+
+  #app-main {
+    margin-left: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Full screen preview */
+  .view-preview {
+    background: #050505 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    min-height: unset !important;
+    background-image: none !important;
+  }
+
+  /* Remove paper card styling — it IS the page */
+  .invoice-paper {
+    width: 100% !important;
+    max-width: none !important;
+    min-height: 100vh !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+  
+  /* Invoice document resets */
+  .invoice-doc {
+    font-size: 12pt !important;
+  }
+
+  /* Ensure accent colors print */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+  }
+
+  /* Page setup */
+  @page {
+    size: A4 portrait;
+    margin: 0mm;
+  }
+
+  /* Prevent table rows from splitting across pages */
+  .inv-tr { page-break-inside: avoid; }
+  table { page-break-inside: auto; }
+  thead { display: table-header-group; }
+
+  /* Ensure the invoice fits the printable area exactly */
+  .invoice-doc { 
+    width: 100% !important; 
+    min-height: 100vh !important;
+  }
+
+  body {
+    background: #050505 !important;
+  }
+
+  .invoice-paper,
+  .invoice-doc {
+    background: #050505 !important;
+  }
+}
