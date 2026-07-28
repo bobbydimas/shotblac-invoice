@@ -974,7 +974,7 @@ ul { list-style: none; }
 .inv-tr:last-child .inv-td { border-bottom: 1px solid rgba(255,255,255,0.1); }
 
 /* Totals */
-.inv-settlement { display: grid; grid-template-columns: 1fr 280px; gap: 42px; padding: 28px 40px 24px; align-items: end; }
+.inv-settlement { display: grid; grid-template-columns: minmax(0, 1fr) 275px; gap: 24px; padding: 28px 40px 24px; align-items: end; }
 .inv-totals-container { display: flex; justify-content: flex-end; }
 .inv-totals { width: 280px; display: flex; flex-direction: column; gap: 8px; }
 .inv-totals-row {
@@ -999,7 +999,7 @@ ul { list-style: none; }
 }
 
 /* Notes */
-.inv-notes { max-width: 340px; }
+.inv-notes { max-width: none; min-width: 0; }
 .inv-notes-label {
   font-size: 9px;
   font-weight: 800;
