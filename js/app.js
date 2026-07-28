@@ -1219,7 +1219,7 @@ const Preview = {
       <div class="invoice-doc invoice-doc-dark" style="--inv-accent:${accent};--inv-gold:${gold}">
         <!-- Original abstract banner artwork -->
         <div class="inv-header">
-          <img src="assets/invoice-wave.png" alt="" class="inv-artwork" />
+          <img src="/assets/invoice-wave.png" alt="" class="inv-artwork" onerror="this.remove();this.parentElement.classList.add('inv-header-fallback')" />
         </div>
 
         <div class="inv-title-row">
