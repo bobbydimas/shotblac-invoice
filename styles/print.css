@@ -58,6 +58,7 @@
   @page {
     size: A4 portrait;
     margin: 0mm;
+    background: #050505;
   }
 
   /* Prevent table rows from splitting across pages */
@@ -69,9 +70,19 @@
   .invoice-doc { 
     width: 100% !important; 
     min-height: 100vh !important;
+    background: #050505 !important;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
   }
 
   body {
+    background: #050505 !important;
+  }
+
+  html,
+  body,
+  #app-shell,
+  #app-main {
     background: #050505 !important;
   }
 
