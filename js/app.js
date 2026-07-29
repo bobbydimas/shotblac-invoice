@@ -45,6 +45,40 @@ const Storage = {
     Cloud.deleteInvoice(id);
   },
 
+  EXPENSES_KEY: 'agency_expenses_v1',
+
+  getExpenses() {
+    try {
+      return JSON.parse(localStorage.getItem(this.EXPENSES_KEY) || '[]');
+    } catch { return []; }
+  },
+
+  saveExpenses(expenses) {
+    localStorage.setItem(this.EXPENSES_KEY, JSON.stringify(expenses));
+    Cloud.syncExpenses(expenses);
+  },
+
+  getExpense(id) {
+    return this.getExpenses().find(exp => exp.id === id) || null;
+  },
+
+  saveExpense(expense) {
+    const expenses = this.getExpenses();
+    const idx = expenses.findIndex(exp => exp.id === expense.id);
+    if (idx === -1) {
+      expenses.unshift(expense);
+    } else {
+      expenses[idx] = expense;
+    }
+    this.saveExpenses(expenses);
+    return expense;
+  },
+
+  deleteExpense(id) {
+    this.saveExpenses(this.getExpenses().filter(exp => exp.id !== id));
+    Cloud.deleteExpense(id);
+  },
+
   getSettings() {
     const defaults = {
       agencyName:            'Your Creative Agency',
@@ -120,9 +154,15 @@ const Cloud = {
   async hydrate() {
     const localInvoices = Storage.getInvoices();
     const localSettings = Storage.getSettings();
-    const [{ data: remoteInvoices, error: invoiceError }, { data: remoteSettings, error: settingsError }] = await Promise.all([
+    const localExpenses = Storage.getExpenses();
+    const [
+      { data: remoteInvoices, error: invoiceError },
+      { data: remoteSettings, error: settingsError },
+      { data: remoteExpenses, error: expenseError },
+    ] = await Promise.all([
       this.client.from('invoices').select('payload').eq('user_id', this.user.id).order('updated_at', { ascending: false }),
       this.client.from('settings').select('payload').eq('user_id', this.user.id).maybeSingle(),
+      this.client.from('expenses').select('payload').eq('user_id', this.user.id).order('updated_at', { ascending: false }),
     ]);
     if (invoiceError || settingsError) {
       this.showError('Cloud history could not load. Run the supplied Supabase SQL, then refresh.');
@@ -137,6 +177,15 @@ const Cloud = {
       localStorage.setItem(Storage.SETTINGS_KEY, JSON.stringify(remoteSettings.payload));
     } else {
       await this.syncSettings(localSettings);
+    }
+    if (expenseError) {
+      // Older Supabase projects may not have run the expenses migration yet —
+      // don't block the whole app over it, expenses just stay local-only until they do.
+      console.warn('Expense cloud sync unavailable. Run the updated supabase-schema.sql to enable it.', expenseError.message);
+    } else if (remoteExpenses?.length) {
+      localStorage.setItem(Storage.EXPENSES_KEY, JSON.stringify(remoteExpenses.map(row => row.payload)));
+    } else if (localExpenses.length) {
+      await this.syncExpenses(localExpenses);
     }
   },
 
@@ -157,6 +206,25 @@ const Cloud = {
     if (!this.ready || !this.user) return;
     const { error } = await this.client.from('invoices').delete().eq('user_id', this.user.id).eq('invoice_id', invoiceId);
     if (error) console.warn('Invoice delete sync failed:', error.message);
+  },
+
+  async syncExpenses(expenses) {
+    if (!this.ready || !this.user) return;
+    const rows = expenses.map(expense => ({
+      user_id: this.user.id,
+      expense_id: expense.id,
+      payload: expense,
+      updated_at: new Date().toISOString(),
+    }));
+    if (!rows.length) return;
+    const { error } = await this.client.from('expenses').upsert(rows, { onConflict: 'user_id,expense_id' });
+    if (error) console.warn('Expense sync failed:', error.message);
+  },
+
+  async deleteExpense(expenseId) {
+    if (!this.ready || !this.user) return;
+    const { error } = await this.client.from('expenses').delete().eq('user_id', this.user.id).eq('expense_id', expenseId);
+    if (error) console.warn('Expense delete sync failed:', error.message);
   },
 
   async syncSettings(settings) {
@@ -349,6 +417,20 @@ const Utils = {
       .replace(/"/g, '&quot;');
   },
 };
+
+// ============================================================
+// EXPENSE CATEGORIES
+// ============================================================
+const EXPENSE_CATEGORIES = [
+  'Equipment',
+  'Software & Subscriptions',
+  'Crew & Talent',
+  'Location & Studio',
+  'Travel & Transport',
+  'Marketing & Ads',
+  'Office & Admin',
+  'Other',
+];
 
 // ============================================================
 // ROUTER — hash-based client-side routing
@@ -766,6 +848,371 @@ const Dashboard = {
       onConfirm:    () => {
         Storage.deleteInvoice(id);
         Toast.show('Invoice deleted', 'info');
+        this.render();
+      },
+    });
+  },
+};
+
+// ============================================================
+// EXPENSES VIEW
+// ============================================================
+const Expenses = {
+  _all:            [],
+  _currentFilter:  'all',
+
+  render() {
+    const main      = document.getElementById('app-main');
+    const settings  = Storage.getSettings();
+    const expenses  = Storage.getExpenses();
+
+    this._all           = expenses;
+    this._currentFilter = 'all';
+
+    const totals = this._computeSummary(expenses);
+
+    main.innerHTML = `
+      <div class="view-dashboard">
+        <div class="view-header">
+          <div>
+            <h1>Expenses</h1>
+            <p class="subtitle">Track what the brand spends on creative work</p>
+          </div>
+          <button class="btn btn-primary btn-lg" onclick="Expenses.openForm()">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add Expense
+          </button>
+        </div>
+
+        <!-- Summary Cards -->
+        <div class="summary-cards">
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--warning-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">This Month</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.thisMonth, settings)}</span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--danger-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">This Year</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.thisYear, settings)}</span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--info-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">All Time</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.allTime, settings)}</span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--success-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">Total Entries</span>
+              <span class="summary-value">${expenses.length}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Monthly chart -->
+        <section class="analytics-section" aria-labelledby="expense-analytics-heading">
+          <div class="analytics-heading">
+            <div>
+              <h2 id="expense-analytics-heading">Monthly spend</h2>
+              <p>Expense activity for ${new Date().getFullYear()}</p>
+            </div>
+          </div>
+          <div class="analytics-grid" style="grid-template-columns:1fr">
+            ${this._renderMonthlyChart(expenses, settings)}
+          </div>
+        </section>
+
+        <!-- Controls -->
+        <div class="invoice-controls">
+          <div class="search-box">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="expense-search-input" placeholder="Search by description or vendor..." oninput="Expenses.filter()" autocomplete="off" />
+          </div>
+          <div class="filter-tabs">
+            <button class="filter-tab active" onclick="Expenses.setFilter('all', this)">All <span style="opacity:.6;font-weight:400">${expenses.length}</span></button>
+            ${EXPENSE_CATEGORIES.map(cat => `<button class="filter-tab" onclick="Expenses.setFilter('${Utils.escHtml(cat)}', this)">${Utils.escHtml(cat)}</button>`).join('')}
+          </div>
+        </div>
+
+        <!-- Expense List -->
+        <div id="expense-list">
+          ${this._renderExpenseList(expenses, settings)}
+        </div>
+      </div>
+    `;
+  },
+
+  _computeSummary(expenses) {
+    const now = new Date();
+    const month = now.getMonth();
+    const year  = now.getFullYear();
+
+    const parsed = expenses.map(e => ({ ...e, _date: e.date ? new Date(`${e.date}T12:00:00`) : null }));
+
+    const sum = (arr) => arr.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+
+    return {
+      thisMonth: sum(parsed.filter(e => e._date && e._date.getMonth() === month && e._date.getFullYear() === year)),
+      thisYear:  sum(parsed.filter(e => e._date && e._date.getFullYear() === year)),
+      allTime:   sum(parsed),
+    };
+  },
+
+  _getMonthlyTotals(expenses) {
+    const totals = Array(12).fill(0);
+    const currentYear = new Date().getFullYear();
+
+    expenses.forEach(expense => {
+      if (!expense.date) return;
+      const date = new Date(`${expense.date}T12:00:00`);
+      if (Number.isNaN(date.getTime()) || date.getFullYear() !== currentYear) return;
+      totals[date.getMonth()] += parseFloat(expense.amount) || 0;
+    });
+
+    return totals;
+  },
+
+  _renderMonthlyChart(expenses, settings) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const values = this._getMonthlyTotals(expenses);
+    const maxValue = Math.max(...values, 0);
+    const chartHeight = 148;
+    const bars = values.map((value, index) => {
+      const height = maxValue ? Math.max((value / maxValue) * chartHeight, value ? 4 : 0) : 0;
+      const amount = Utils.escHtml(Utils.formatCurrency(value, settings));
+      return `
+        <div class="chart-column" title="${months[index]}: ${amount}">
+          <span class="chart-tooltip">${amount}</span>
+          <div class="chart-bar-track"><div class="chart-bar chart-bar-expense" style="height:${height}px"></div></div>
+          <span class="chart-month">${months[index]}</span>
+        </div>`;
+    }).join('');
+
+    return `
+      <article class="chart-card">
+        <div class="chart-card-header">
+          <h3>Total spent</h3>
+          <span>${Utils.formatCurrency(values.reduce((sum, value) => sum + value, 0), settings)}</span>
+        </div>
+        <div class="chart-plot" role="img" aria-label="Monthly spend for ${new Date().getFullYear()}">
+          <div class="chart-gridlines"><span></span><span></span><span></span><span></span></div>
+          <div class="chart-columns">${bars}</div>
+        </div>
+      </article>`;
+  },
+
+  _renderExpenseList(expenses, settings) {
+    if (!settings) settings = Storage.getSettings();
+
+    if (!expenses.length) {
+      return `
+        <div class="invoice-table">
+          <div class="empty-state">
+            <div class="empty-icon">💸</div>
+            <h3>No expenses logged yet</h3>
+            <p>Add your first expense to start tracking spend</p>
+            <button class="btn btn-primary" onclick="Expenses.openForm()" style="margin-top:8px">
+              Add Expense
+            </button>
+          </div>
+        </div>`;
+    }
+
+    const sorted = [...expenses].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+    const rows = sorted.map(exp => {
+      const vendor = exp.vendor ? `<small>${Utils.escHtml(exp.vendor)}</small>` : '';
+      return `
+        <div class="expense-row" onclick="Expenses.openForm('${exp.id}')">
+          <span>${Utils.formatDate(exp.date)}</span>
+          <span class="client-name">
+            <strong>${Utils.escHtml(exp.description) || '—'}</strong>
+            ${vendor}
+          </span>
+          <span><span class="category-badge">${Utils.escHtml(exp.category || 'Other')}</span></span>
+          <span class="invoice-amount">${Utils.formatCurrency(exp.amount, settings)}</span>
+          <span class="row-actions" onclick="event.stopPropagation()">
+            <button class="icon-btn" title="Edit" onclick="Expenses.openForm('${exp.id}')">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </button>
+            <button class="icon-btn icon-btn-danger" title="Delete" onclick="Expenses.confirmDelete('${exp.id}')">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+            </button>
+          </span>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="invoice-table">
+        <div class="expense-table-header">
+          <span>Date</span>
+          <span>Description</span>
+          <span>Category</span>
+          <span>Amount</span>
+          <span></span>
+        </div>
+        ${rows}
+      </div>`;
+  },
+
+  setFilter(filter, btn) {
+    this._currentFilter = filter;
+    document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    this.filter();
+  },
+
+  filter() {
+    const query    = (document.getElementById('expense-search-input')?.value || '').toLowerCase().trim();
+    const settings = Storage.getSettings();
+    let filtered   = this._all;
+
+    if (this._currentFilter !== 'all') {
+      filtered = filtered.filter(exp => exp.category === this._currentFilter);
+    }
+    if (query) {
+      filtered = filtered.filter(exp =>
+        exp.description?.toLowerCase().includes(query) ||
+        exp.vendor?.toLowerCase().includes(query)
+      );
+    }
+
+    const el = document.getElementById('expense-list');
+    if (el) el.innerHTML = this._renderExpenseList(filtered, settings);
+  },
+
+  openForm(id) {
+    const isEdit   = Boolean(id);
+    const existing = isEdit ? Storage.getExpense(id) : null;
+    const expense  = existing || {
+      id:          Utils.generateId(),
+      date:        Utils.today(),
+      category:    EXPENSE_CATEGORIES[0],
+      description: '',
+      vendor:      '',
+      amount:      0,
+      notes:       '',
+    };
+    const settings = Storage.getSettings();
+
+    const overlay   = document.getElementById('modal-overlay');
+    const title     = document.getElementById('modal-title');
+    const body      = document.getElementById('modal-body');
+    const confirm   = document.getElementById('modal-confirm');
+    const cancel    = document.getElementById('modal-cancel');
+    const closeBtn  = document.getElementById('modal-close');
+
+    title.textContent = isEdit ? 'Edit Expense' : 'Add Expense';
+    body.innerHTML = `
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Date *</label>
+          <input type="date" id="exp-date" value="${expense.date || Utils.today()}" />
+        </div>
+        <div class="form-group">
+          <label>Category</label>
+          <select id="exp-category">
+            ${EXPENSE_CATEGORIES.map(cat => `<option value="${Utils.escHtml(cat)}" ${expense.category === cat ? 'selected' : ''}>${Utils.escHtml(cat)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group form-full">
+          <label>What was this for? *</label>
+          <input type="text" id="exp-description" placeholder="e.g. Drone hire for Untold Voices shoot" value="${Utils.escHtml(expense.description || '')}" />
+        </div>
+        <div class="form-group">
+          <label>Paid to / Vendor</label>
+          <input type="text" id="exp-vendor" placeholder="e.g. ABC Rentals" value="${Utils.escHtml(expense.vendor || '')}" />
+        </div>
+        <div class="form-group">
+          <label>Amount *</label>
+          <div class="input-with-prefix">
+            <span>${settings.currencySymbol}</span>
+            <input type="number" id="exp-amount" min="0" step="0.01" value="${expense.amount || 0}" />
+          </div>
+        </div>
+        <div class="form-group form-full">
+          <label>Notes</label>
+          <textarea id="exp-notes" rows="3" placeholder="Optional context...">${Utils.escHtml(expense.notes || '')}</textarea>
+        </div>
+      </div>`;
+    confirm.textContent = isEdit ? 'Save Changes' : 'Add Expense';
+    confirm.className    = 'btn btn-primary';
+    cancel.textContent   = 'Cancel';
+
+    overlay.classList.add('visible');
+    const cleanup = () => overlay.classList.remove('visible');
+
+    // Clone to remove old listeners (same pattern as Modal.show)
+    const newConfirm = confirm.cloneNode(true);
+    const newCancel  = cancel.cloneNode(true);
+    const newClose   = closeBtn.cloneNode(true);
+    confirm.replaceWith(newConfirm);
+    cancel.replaceWith(newCancel);
+    closeBtn.replaceWith(newClose);
+
+    newConfirm.addEventListener('click', () => {
+      const date        = document.getElementById('exp-date').value || Utils.today();
+      const description = document.getElementById('exp-description').value.trim();
+      const amount       = parseFloat(document.getElementById('exp-amount').value) || 0;
+
+      if (!description) {
+        Toast.show('Please describe what this expense was for', 'error');
+        document.getElementById('exp-description')?.focus();
+        return;
+      }
+      if (!amount || amount <= 0) {
+        Toast.show('Please enter a valid amount', 'error');
+        document.getElementById('exp-amount')?.focus();
+        return;
+      }
+
+      const record = {
+        ...expense,
+        date,
+        description,
+        category:  document.getElementById('exp-category').value,
+        vendor:    document.getElementById('exp-vendor').value.trim(),
+        amount,
+        notes:     document.getElementById('exp-notes').value.trim(),
+        createdAt: expense.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      Storage.saveExpense(record);
+      cleanup();
+      Toast.show(isEdit ? 'Expense updated' : 'Expense added');
+      Expenses.render();
+    });
+    newCancel.addEventListener('click', cleanup);
+    newClose.addEventListener('click',  cleanup);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); }, { once: true });
+  },
+
+  confirmDelete(id) {
+    const exp = Storage.getExpense(id);
+    Modal.show({
+      title:        'Delete Expense',
+      body:         `<p>Are you sure you want to delete <strong>${Utils.escHtml(exp?.description)}</strong>?<br>This action cannot be undone.</p>`,
+      confirmText:  'Delete Expense',
+      confirmClass: 'danger',
+      onConfirm:    () => {
+        Storage.deleteExpense(id);
+        Toast.show('Expense deleted', 'info');
         this.render();
       },
     });
@@ -1566,6 +2013,7 @@ function initApp() {
     .on('dashboard', ()   => Dashboard.render())
     .on('editor',    (id) => Editor.render(id || 'new'))
     .on('preview',   (id) => Preview.render(id))
+    .on('expenses',  ()   => Expenses.render())
     .on('settings',  ()   => Settings.render())
     .init();
 }
