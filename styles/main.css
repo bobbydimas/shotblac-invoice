@@ -514,6 +514,7 @@ ul { list-style: none; }
 .chart-bar-invoice { background: linear-gradient(180deg, #f0f0f0, #8a8a8a); }
 .chart-bar-overdue { background: linear-gradient(180deg, #f87171, #b63838); }
 .chart-bar-tax { background: linear-gradient(180deg, #93c5fd, #4b7caf); }
+.chart-bar-expense { background: linear-gradient(180deg, #facc15, #b8901a); }
 .chart-column:hover .chart-bar { filter: brightness(1.2); }
 .chart-tooltip { position: absolute; bottom: 174px; left: 50%; transform: translateX(-50%) translateY(4px); opacity: 0; pointer-events: none; background: #f2f2f2; color: #111; border-radius: 5px; font-size: 10px; font-weight: 700; line-height: 1; padding: 6px 7px; white-space: nowrap; transition: opacity var(--transition), transform var(--transition); z-index: 2; }
 .chart-column:hover .chart-tooltip { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -605,6 +606,44 @@ ul { list-style: none; }
 }
 .invoice-row:last-child { border-bottom: none; }
 .invoice-row:hover { background: rgba(255,255,255,0.025); }
+
+.expense-table-header {
+  display: grid;
+  grid-template-columns: 1.3fr 3fr 1.6fr 1.2fr 90px;
+  padding: 12px 20px;
+  background: rgba(255,255,255,0.02);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.expense-row {
+  display: grid;
+  grid-template-columns: 1.3fr 3fr 1.6fr 1.2fr 90px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+  cursor: pointer;
+  transition: background var(--transition);
+  font-size: 14px;
+}
+.expense-row:last-child { border-bottom: none; }
+.expense-row:hover { background: rgba(255,255,255,0.025); }
+
+.category-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
 
 .invoice-number {
   font-family: var(--font-display);
@@ -1257,6 +1296,10 @@ ul { list-style: none; }
   .invoice-table-header span:nth-child(4),
   .invoice-row > span:nth-child(3),
   .invoice-row > span:nth-child(4) { display: none; }
+  .expense-table-header,
+  .expense-row { grid-template-columns: 1fr 1fr auto; }
+  .expense-table-header span:nth-child(3),
+  .expense-row > span:nth-child(3) { display: none; }
   .form-grid { grid-template-columns: 1fr; }
   .items-header, .item-row { grid-template-columns: 1fr 60px 100px 40px; }
   .items-header span:nth-child(4),
