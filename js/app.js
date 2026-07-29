@@ -538,6 +538,94 @@ const Modal = {
 };
 
 // ============================================================
+// OVERVIEW VIEW — lightweight top-level summary
+// ============================================================
+const Overview = {
+  render() {
+    const main     = document.getElementById('app-main');
+    const settings = Storage.getSettings();
+    const invoices = Storage.getInvoices();
+    const expenses = Storage.getExpenses();
+
+    const totals = this._computeSummary(invoices, expenses, settings);
+
+    main.innerHTML = `
+      <div class="view-dashboard">
+        <div class="view-header">
+          <div>
+            <h1>Dashboard</h1>
+            <p class="subtitle">Your business at a glance</p>
+          </div>
+        </div>
+
+        <!-- Summary Cards -->
+        <div class="summary-cards">
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--accent-glow)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-light)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">Total Invoiced</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.invoiced, settings)}</span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--info-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">Total ${Utils.escHtml(settings.taxLabel)}</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.tax, settings)}</span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--warning-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">Outstanding</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.outstanding, settings)}</span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--danger-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">Total Expenses</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.expenses, settings)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+          <button class="btn btn-primary btn-lg" onclick="Router.navigate('editor/new')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New Invoice
+          </button>
+          <button class="btn btn-ghost btn-lg" onclick="Router.navigate('expenses')">Add Expense</button>
+          <button class="btn btn-ghost btn-lg" onclick="Router.navigate('invoices')">View All Invoices</button>
+        </div>
+      </div>
+    `;
+  },
+
+  _computeSummary(invoices, expenses, settings) {
+    const sum = (arr) => arr.reduce((s, inv) =>
+      s + Utils.calculateTotals(inv.items || [], inv.discountType, inv.discountValue, inv.taxRate ?? settings.defaultTaxRate).total, 0);
+    const sumTax = (arr) => arr.reduce((s, inv) =>
+      s + Utils.calculateTotals(inv.items || [], inv.discountType, inv.discountValue, inv.taxRate ?? settings.defaultTaxRate).taxAmount, 0);
+
+    return {
+      invoiced:    sum(invoices),
+      tax:         sumTax(invoices),
+      outstanding: sum(invoices.filter(i => ['sent', 'draft'].includes(i.status))),
+      expenses:    expenses.reduce((s, exp) => s + (parseFloat(exp.amount) || 0), 0),
+    };
+  },
+};
+
+// ============================================================
 // DASHBOARD VIEW
 // ============================================================
 const Dashboard = {
@@ -1252,7 +1340,7 @@ const Editor = {
       };
     } else {
       this._invoice = Storage.getInvoice(id);
-      if (!this._invoice) { Router.navigate('dashboard'); return; }
+      if (!this._invoice) { Router.navigate('invoices'); return; }
       this._invoice.taxRate = this._invoice.taxRate ?? settings.defaultTaxRate ?? 0;
     }
 
@@ -1589,7 +1677,7 @@ const Preview = {
 
   render(id) {
     this._invoice = Storage.getInvoice(id);
-    if (!this._invoice) { Router.navigate('dashboard'); return; }
+    if (!this._invoice) { Router.navigate('invoices'); return; }
 
     const settings = Storage.getSettings();
     const totals   = Utils.calculateTotals(
@@ -2010,7 +2098,8 @@ function initApp() {
   if (navName) navName.textContent = settings.agencyName;
 
   Router
-    .on('dashboard', ()   => Dashboard.render())
+    .on('dashboard', ()   => Overview.render())
+    .on('invoices',  ()   => Dashboard.render())
     .on('editor',    (id) => Editor.render(id || 'new'))
     .on('preview',   (id) => Preview.render(id))
     .on('expenses',  ()   => Expenses.render())
