@@ -598,6 +598,21 @@ const Overview = {
           </div>
         </div>
 
+        <!-- Visual summary -->
+        <section class="analytics-section" aria-labelledby="overview-analytics-heading">
+          <div class="analytics-heading">
+            <div>
+              <h2 id="overview-analytics-heading">Visual summary</h2>
+              <p>Cash flow, invoice mix, and spend for ${new Date().getFullYear()}</p>
+            </div>
+          </div>
+          <div class="analytics-grid">
+            ${this._renderCashFlowChart(invoices, expenses, settings)}
+            ${this._renderStatusDonut(invoices, settings)}
+            ${this._renderCategoryBars(expenses, settings)}
+          </div>
+        </section>
+
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
           <button class="btn btn-primary btn-lg" onclick="Router.navigate('editor/new')">
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -608,6 +623,130 @@ const Overview = {
         </div>
       </div>
     `;
+  },
+
+  _renderCashFlowChart(invoices, expenses, settings) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const currentYear = new Date().getFullYear();
+    const invoicedByMonth = Array(12).fill(0);
+    const expensesByMonth = Array(12).fill(0);
+
+    invoices.forEach(inv => {
+      if (!inv.issueDate) return;
+      const date = new Date(`${inv.issueDate}T12:00:00`);
+      if (Number.isNaN(date.getTime()) || date.getFullYear() !== currentYear) return;
+      invoicedByMonth[date.getMonth()] += Utils.calculateTotals(inv.items || [], inv.discountType, inv.discountValue, inv.taxRate ?? settings.defaultTaxRate).total;
+    });
+    expenses.forEach(exp => {
+      if (!exp.date) return;
+      const date = new Date(`${exp.date}T12:00:00`);
+      if (Number.isNaN(date.getTime()) || date.getFullYear() !== currentYear) return;
+      expensesByMonth[date.getMonth()] += parseFloat(exp.amount) || 0;
+    });
+
+    const maxValue = Math.max(...invoicedByMonth, ...expensesByMonth, 0);
+    const chartHeight = 148;
+
+    const columns = months.map((month, i) => {
+      const invHeight = maxValue ? Math.max((invoicedByMonth[i] / maxValue) * chartHeight, invoicedByMonth[i] ? 3 : 0) : 0;
+      const expHeight = maxValue ? Math.max((expensesByMonth[i] / maxValue) * chartHeight, expensesByMonth[i] ? 3 : 0) : 0;
+      const tip = `${month}: ${Utils.escHtml(Utils.formatCurrency(invoicedByMonth[i], settings))} invoiced, ${Utils.escHtml(Utils.formatCurrency(expensesByMonth[i], settings))} spent`;
+      return `
+        <div class="chart-column" title="${tip}">
+          <span class="chart-tooltip">${tip}</span>
+          <div class="dual-bar-track">
+            <div class="dual-bar chart-bar-invoice" style="height:${invHeight}px"></div>
+            <div class="dual-bar chart-bar-expense" style="height:${expHeight}px"></div>
+          </div>
+          <span class="chart-month">${month}</span>
+        </div>`;
+    }).join('');
+
+    return `
+      <article class="chart-card">
+        <div class="chart-card-header">
+          <h3>Invoiced vs. Expenses</h3>
+        </div>
+        <div class="chart-legend-inline">
+          <span><i style="background:linear-gradient(180deg,#f0f0f0,#8a8a8a)"></i>Invoiced</span>
+          <span><i style="background:linear-gradient(180deg,#facc15,#b8901a)"></i>Expenses</span>
+        </div>
+        <div class="chart-plot" role="img" aria-label="Invoiced versus expenses by month for ${currentYear}">
+          <div class="chart-gridlines"><span></span><span></span><span></span><span></span></div>
+          <div class="chart-columns">${columns}</div>
+        </div>
+      </article>`;
+  },
+
+  _renderStatusDonut(invoices, settings) {
+    const groups = [
+      { status: 'paid',    label: 'Paid',       color: 'var(--success)' },
+      { status: 'sent',    label: 'Sent',       color: 'var(--info)' },
+      { status: 'draft',   label: 'Draft',      color: 'var(--text-muted)' },
+      { status: 'overdue', label: 'Overdue',    color: 'var(--danger)' },
+    ].map(group => ({
+      ...group,
+      value: invoices
+        .filter(inv => inv.status === group.status)
+        .reduce((s, inv) => s + Utils.calculateTotals(inv.items || [], inv.discountType, inv.discountValue, inv.taxRate ?? settings.defaultTaxRate).total, 0),
+    }));
+
+    const total = groups.reduce((s, g) => s + g.value, 0);
+
+    let offset = 25;
+    const circles = total ? groups.filter(g => g.value > 0).map(g => {
+      const percent = (g.value / total) * 100;
+      const circle = `<circle cx="18" cy="18" r="15.915" fill="transparent" stroke="${g.color}" stroke-width="3.6" stroke-dasharray="${percent} ${100 - percent}" stroke-dashoffset="${offset}"></circle>`;
+      offset -= percent;
+      return circle;
+    }).join('') : `<circle cx="18" cy="18" r="15.915" fill="transparent" stroke="var(--border)" stroke-width="3.6"></circle>`;
+
+    const legend = groups.map(g => `
+      <div class="donut-legend-item">
+        <span class="donut-legend-dot" style="background:${g.color}"></span>
+        <span class="donut-legend-label">${g.label}</span>
+        <span class="donut-legend-value">${Utils.formatCurrency(g.value, settings)}</span>
+      </div>`).join('');
+
+    return `
+      <article class="chart-card">
+        <div class="chart-card-header">
+          <h3>Invoice Status Mix</h3>
+        </div>
+        <div class="donut-wrap">
+          <svg class="donut-chart" viewBox="0 0 36 36" role="img" aria-label="Invoice status breakdown by value">${circles}</svg>
+          <div class="donut-legend">${legend}</div>
+        </div>
+      </article>`;
+  },
+
+  _renderCategoryBars(expenses, settings) {
+    const byCategory = {};
+    expenses.forEach(exp => {
+      const cat = exp.category || 'Other';
+      byCategory[cat] = (byCategory[cat] || 0) + (parseFloat(exp.amount) || 0);
+    });
+    const rows = Object.entries(byCategory).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    const maxValue = Math.max(...rows.map(r => r[1]), 0);
+
+    const body = rows.length ? rows.map(([category, value]) => `
+      <div class="category-bar-row">
+        <div class="category-bar-label">
+          <span>${Utils.escHtml(category)}</span>
+          <strong>${Utils.formatCurrency(value, settings)}</strong>
+        </div>
+        <div class="category-bar-track">
+          <div class="category-bar-fill" style="width:${maxValue ? (value / maxValue) * 100 : 0}%"></div>
+        </div>
+      </div>`).join('') : `<p style="color:var(--text-secondary);font-size:13px">No expenses logged yet.</p>`;
+
+    return `
+      <article class="chart-card">
+        <div class="chart-card-header">
+          <h3>Spend by Category</h3>
+        </div>
+        <div class="category-bars">${body}</div>
+      </article>`;
   },
 
   _computeSummary(invoices, expenses, settings) {
