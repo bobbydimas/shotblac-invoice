@@ -45,6 +45,40 @@ const Storage = {
     Cloud.deleteInvoice(id);
   },
 
+  QUOTATIONS_KEY: 'agency_quotations_v1',
+
+  getQuotations() {
+    try {
+      return JSON.parse(localStorage.getItem(this.QUOTATIONS_KEY) || '[]');
+    } catch { return []; }
+  },
+
+  saveQuotations(quotations) {
+    localStorage.setItem(this.QUOTATIONS_KEY, JSON.stringify(quotations));
+    Cloud.syncQuotations(quotations);
+  },
+
+  getQuotation(id) {
+    return this.getQuotations().find(q => q.id === id) || null;
+  },
+
+  saveQuotation(quotation) {
+    const quotations = this.getQuotations();
+    const idx = quotations.findIndex(q => q.id === quotation.id);
+    if (idx === -1) {
+      quotations.unshift(quotation);
+    } else {
+      quotations[idx] = quotation;
+    }
+    this.saveQuotations(quotations);
+    return quotation;
+  },
+
+  deleteQuotation(id) {
+    this.saveQuotations(this.getQuotations().filter(q => q.id !== id));
+    Cloud.deleteQuotation(id);
+  },
+
   EXPENSES_KEY: 'agency_expenses_v1',
 
   getExpenses() {
@@ -97,6 +131,7 @@ const Storage = {
       accentColor:           '#2a2a2a',
       accentColorSecondary:  '#111111',
       nextInvoiceNumber:     1,
+      nextQuoteNumber:       1,
     };
     try {
       const saved = JSON.parse(localStorage.getItem(this.SETTINGS_KEY) || '{}');
@@ -152,17 +187,20 @@ const Cloud = {
   },
 
   async hydrate() {
-    const localInvoices = Storage.getInvoices();
-    const localSettings = Storage.getSettings();
-    const localExpenses = Storage.getExpenses();
+    const localInvoices   = Storage.getInvoices();
+    const localSettings   = Storage.getSettings();
+    const localExpenses   = Storage.getExpenses();
+    const localQuotations = Storage.getQuotations();
     const [
       { data: remoteInvoices, error: invoiceError },
       { data: remoteSettings, error: settingsError },
       { data: remoteExpenses, error: expenseError },
+      { data: remoteQuotations, error: quotationError },
     ] = await Promise.all([
       this.client.from('invoices').select('payload').eq('user_id', this.user.id).order('updated_at', { ascending: false }),
       this.client.from('settings').select('payload').eq('user_id', this.user.id).maybeSingle(),
       this.client.from('expenses').select('payload').eq('user_id', this.user.id).order('updated_at', { ascending: false }),
+      this.client.from('quotations').select('payload').eq('user_id', this.user.id).order('updated_at', { ascending: false }),
     ]);
     if (invoiceError || settingsError) {
       this.showError('Cloud history could not load. Run the supplied Supabase SQL, then refresh.');
@@ -187,6 +225,14 @@ const Cloud = {
     } else if (localExpenses.length) {
       await this.syncExpenses(localExpenses);
     }
+    if (quotationError) {
+      // Same graceful fallback for accounts that haven't run the quotations migration yet.
+      console.warn('Quotation cloud sync unavailable. Run the updated supabase-schema.sql to enable it.', quotationError.message);
+    } else if (remoteQuotations?.length) {
+      localStorage.setItem(Storage.QUOTATIONS_KEY, JSON.stringify(remoteQuotations.map(row => row.payload)));
+    } else if (localQuotations.length) {
+      await this.syncQuotations(localQuotations);
+    }
   },
 
   async syncInvoices(invoices) {
@@ -206,6 +252,25 @@ const Cloud = {
     if (!this.ready || !this.user) return;
     const { error } = await this.client.from('invoices').delete().eq('user_id', this.user.id).eq('invoice_id', invoiceId);
     if (error) console.warn('Invoice delete sync failed:', error.message);
+  },
+
+  async syncQuotations(quotations) {
+    if (!this.ready || !this.user) return;
+    const rows = quotations.map(quote => ({
+      user_id: this.user.id,
+      quote_id: quote.id,
+      payload: quote,
+      updated_at: new Date().toISOString(),
+    }));
+    if (!rows.length) return;
+    const { error } = await this.client.from('quotations').upsert(rows, { onConflict: 'user_id,quote_id' });
+    if (error) console.warn('Quotation sync failed:', error.message);
+  },
+
+  async deleteQuotation(quoteId) {
+    if (!this.ready || !this.user) return;
+    const { error } = await this.client.from('quotations').delete().eq('user_id', this.user.id).eq('quote_id', quoteId);
+    if (error) console.warn('Quotation delete sync failed:', error.message);
   },
 
   async syncExpenses(expenses) {
@@ -383,6 +448,12 @@ const Utils = {
     const year = new Date().getFullYear();
     const num = String(settings.nextInvoiceNumber).padStart(4, '0');
     return `INV-${year}-${num}`;
+  },
+
+  generateQuoteNumber(settings) {
+    const year = new Date().getFullYear();
+    const num = String(settings.nextQuoteNumber || 1).padStart(4, '0');
+    return `QUO-${year}-${num}`;
   },
 
   calculateTotals(items, discountType, discountValue, taxRate = 0) {
@@ -1447,6 +1518,220 @@ const Expenses = {
 };
 
 // ============================================================
+// QUOTATIONS VIEW (list)
+// ============================================================
+const Quotations = {
+  _currentFilter:  'all',
+  _all:            [],
+
+  render() {
+    const main       = document.getElementById('app-main');
+    const settings   = Storage.getSettings();
+    const quotations = Storage.getQuotations();
+
+    this._all            = quotations;
+    this._currentFilter  = 'all';
+
+    const totals = this._computeSummary(quotations, settings);
+
+    main.innerHTML = `
+      <div class="view-dashboard">
+        <div class="view-header">
+          <div>
+            <h1>Quotations</h1>
+            <p class="subtitle">Send quotes to prospects — nothing here touches your finances until it becomes an invoice</p>
+          </div>
+          <button class="btn btn-primary btn-lg" onclick="Router.navigate('quote-editor/new')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New Quotation
+          </button>
+        </div>
+
+        <!-- Summary Cards -->
+        <div class="summary-cards">
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--accent-glow)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-light)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">Total Quoted</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.total, settings)}</span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--success-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">Accepted</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.accepted, settings)}</span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--info-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">Awaiting Response</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.pending, settings)}</span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="background:var(--danger-bg)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </div>
+            <div class="summary-info">
+              <span class="summary-label">Declined / Expired</span>
+              <span class="summary-value">${Utils.formatCurrency(totals.lost, settings)}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="invoice-controls">
+          <div class="search-box">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="quote-search-input" placeholder="Search by client or quote number..." oninput="Quotations.filter()" autocomplete="off" />
+          </div>
+          <div class="filter-tabs">
+            <button class="filter-tab active" onclick="Quotations.setFilter('all', this)">All <span style="opacity:.6;font-weight:400">${quotations.length}</span></button>
+            <button class="filter-tab" onclick="Quotations.setFilter('draft',    this)">Draft</button>
+            <button class="filter-tab" onclick="Quotations.setFilter('sent',     this)">Sent</button>
+            <button class="filter-tab" onclick="Quotations.setFilter('accepted', this)">Accepted</button>
+            <button class="filter-tab" onclick="Quotations.setFilter('declined', this)">Declined</button>
+            <button class="filter-tab" onclick="Quotations.setFilter('expired',  this)">Expired</button>
+          </div>
+        </div>
+
+        <!-- Quotation List -->
+        <div id="quote-list">
+          ${this._renderList(quotations, settings)}
+        </div>
+      </div>
+    `;
+  },
+
+  _computeSummary(quotations, settings) {
+    const sum = (arr) => arr.reduce((s, q) =>
+      s + Utils.calculateTotals(q.items || [], q.discountType, q.discountValue, q.taxRate ?? settings.defaultTaxRate).total, 0);
+    return {
+      total:    sum(quotations),
+      accepted: sum(quotations.filter(q => q.status === 'accepted')),
+      pending:  sum(quotations.filter(q => ['sent', 'draft'].includes(q.status))),
+      lost:     sum(quotations.filter(q => ['declined', 'expired'].includes(q.status))),
+    };
+  },
+
+  _renderList(quotations, settings) {
+    if (!settings) settings = Storage.getSettings();
+
+    if (!quotations.length) {
+      return `
+        <div class="invoice-table">
+          <div class="empty-state">
+            <div class="empty-icon">📝</div>
+            <h3>No quotations yet</h3>
+            <p>Create a quote to send to a prospective client</p>
+            <button class="btn btn-primary" onclick="Router.navigate('quote-editor/new')" style="margin-top:8px">
+              Create Quotation
+            </button>
+          </div>
+        </div>`;
+    }
+
+    const rows = quotations.map(q => {
+      const totals   = Utils.calculateTotals(q.items || [], q.discountType, q.discountValue, q.taxRate ?? settings.defaultTaxRate);
+      const clientCo = q.clientCompany ? `<small>${Utils.escHtml(q.clientCompany)}</small>` : '';
+      const converted = q.convertedInvoiceId ? `<button class="icon-btn" title="View converted invoice" onclick="event.stopPropagation();Router.navigate('preview/${q.convertedInvoiceId}')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+      </button>` : '';
+      return `
+        <div class="invoice-row" onclick="Router.navigate('quote-preview/${q.id}')">
+          <span class="invoice-number">${Utils.escHtml(q.quoteNumber)}</span>
+          <span class="client-name">
+            <strong>${Utils.escHtml(q.clientName) || '—'}</strong>
+            ${clientCo}
+          </span>
+          <span>${Utils.formatDate(q.issueDate)}</span>
+          <span>${Utils.formatDate(q.validUntil)}</span>
+          <span class="invoice-amount" style="font-size:14px;">
+            ${q.taxRate ?? settings.defaultTaxRate ?? 0}% <span style="font-size:12px; opacity:0.6;">(${Utils.formatCurrency(totals.taxAmount, settings)})</span>
+          </span>
+          <span class="invoice-amount">${Utils.formatCurrency(totals.total, settings)}</span>
+          <span><span class="status-badge status-${q.status}">${q.status}</span></span>
+          <span class="row-actions" onclick="event.stopPropagation()">
+            ${converted}
+            <button class="icon-btn" title="Edit" onclick="Router.navigate('quote-editor/${q.id}')">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </button>
+            <button class="icon-btn icon-btn-danger" title="Delete" onclick="Quotations.confirmDelete('${q.id}')">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+            </button>
+          </span>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="invoice-table">
+        <div class="invoice-table-header">
+          <span>Quote #</span>
+          <span>Client</span>
+          <span>Issue Date</span>
+          <span>Valid Until</span>
+          <span>Tax</span>
+          <span>Amount</span>
+          <span>Status</span>
+          <span></span>
+        </div>
+        ${rows}
+      </div>`;
+  },
+
+  setFilter(filter, btn) {
+    this._currentFilter = filter;
+    document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    this.filter();
+  },
+
+  filter() {
+    const query    = (document.getElementById('quote-search-input')?.value || '').toLowerCase().trim();
+    const settings = Storage.getSettings();
+    let filtered   = this._all;
+
+    if (this._currentFilter !== 'all') {
+      filtered = filtered.filter(q => q.status === this._currentFilter);
+    }
+    if (query) {
+      filtered = filtered.filter(q =>
+        q.quoteNumber?.toLowerCase().includes(query) ||
+        q.clientName?.toLowerCase().includes(query)  ||
+        q.clientCompany?.toLowerCase().includes(query) ||
+        q.projectName?.toLowerCase().includes(query)
+      );
+    }
+
+    const el = document.getElementById('quote-list');
+    if (el) el.innerHTML = this._renderList(filtered, settings);
+  },
+
+  confirmDelete(id) {
+    const q = Storage.getQuotation(id);
+    Modal.show({
+      title:        'Delete Quotation',
+      body:         `<p>Are you sure you want to delete quotation <strong>${Utils.escHtml(q?.quoteNumber)}</strong>?<br>This action cannot be undone.</p>`,
+      confirmText:  'Delete Quotation',
+      confirmClass: 'danger',
+      onConfirm:    () => {
+        Storage.deleteQuotation(id);
+        Toast.show('Quotation deleted', 'info');
+        this.render();
+      },
+    });
+  },
+};
+
+// ============================================================
 // EDITOR VIEW
 // ============================================================
 const Editor = {
@@ -2017,6 +2302,633 @@ const Preview = {
 };
 
 // ============================================================
+// QUOTE EDITOR VIEW
+// ============================================================
+const QuoteEditor = {
+  _quote: null,
+  _isNew: false,
+
+  render(id) {
+    const settings = Storage.getSettings();
+    this._isNew    = !id || id === 'new';
+
+    if (this._isNew) {
+      this._quote = {
+        id:            Utils.generateId(),
+        quoteNumber:   Utils.generateQuoteNumber(settings),
+        status:        'draft',
+        clientName:    '',
+        clientCompany: '',
+        clientEmail:   '',
+        clientAddress: '',
+        projectName:   '',
+        issueDate:     Utils.today(),
+        validUntil:    Utils.addDays(Utils.today(), 30),
+        items:         [this._newItem(settings)],
+        discountType:  'percentage',
+        discountValue: 0,
+        taxRate:       settings.defaultTaxRate || 0,
+        notes:         `${settings.defaultPaymentTerms}\n\n${settings.bankDetails}`,
+        convertedInvoiceId: null,
+        createdAt:     new Date().toISOString(),
+        updatedAt:     new Date().toISOString(),
+      };
+    } else {
+      this._quote = Storage.getQuotation(id);
+      if (!this._quote) { Router.navigate('quotations'); return; }
+      this._quote.taxRate = this._quote.taxRate ?? settings.defaultTaxRate ?? 0;
+    }
+
+    document.getElementById('app-main').innerHTML = this._buildHTML(settings);
+  },
+
+  _buildHTML(settings) {
+    const q = this._quote;
+    return `
+      <div class="view-editor">
+        <div class="view-header">
+          <div style="display:flex;align-items:center;gap:14px">
+            <button class="btn btn-ghost" onclick="Router.back()">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              Back
+            </button>
+            <div>
+              <h1>${this._isNew ? 'New Quotation' : 'Edit Quotation'}</h1>
+              <p class="subtitle">${Utils.escHtml(q.quoteNumber)}</p>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-ghost" onclick="QuoteEditor.save('draft', true)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              Save Draft
+            </button>
+            <button class="btn btn-primary" onclick="QuoteEditor.saveAndPreview()">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              Preview Quotation
+            </button>
+          </div>
+        </div>
+
+        <div class="editor-layout">
+          <div class="editor-main">
+
+            <!-- Client -->
+            <div class="editor-section">
+              <h2 class="section-title">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                Client Details
+              </h2>
+              <div class="form-grid">
+                <div class="form-group">
+                  <label>Client Name *</label>
+                  <input type="text" id="f-clientName" placeholder="John Smith" value="${Utils.escHtml(q.clientName)}" oninput="QuoteEditor._set('clientName',this.value)" autocomplete="name" />
+                </div>
+                <div class="form-group">
+                  <label>Company / Organisation</label>
+                  <input type="text" id="f-clientCompany" placeholder="Acme Corp" value="${Utils.escHtml(q.clientCompany)}" oninput="QuoteEditor._set('clientCompany',this.value)" />
+                </div>
+                <div class="form-group">
+                  <label>Email Address</label>
+                  <input type="email" id="f-clientEmail" placeholder="john@acmecorp.com" value="${Utils.escHtml(q.clientEmail)}" oninput="QuoteEditor._set('clientEmail',this.value)" />
+                </div>
+                <div class="form-group">
+                  <label>Project Name</label>
+                  <input type="text" id="f-projectName" placeholder="Brand Identity Project" value="${Utils.escHtml(q.projectName)}" oninput="QuoteEditor._set('projectName',this.value)" />
+                </div>
+                <div class="form-group form-full">
+                  <label>Billing Address</label>
+                  <textarea id="f-clientAddress" rows="3" placeholder="123 Client Street&#10;London, UK" oninput="QuoteEditor._set('clientAddress',this.value)">${Utils.escHtml(q.clientAddress)}</textarea>
+                </div>
+              </div>
+            </div>
+
+            <!-- Quotation Details -->
+            <div class="editor-section">
+              <h2 class="section-title">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                Quotation Details
+              </h2>
+              <div class="form-grid">
+                <div class="form-group">
+                  <label>Quote Number</label>
+                  <input type="text" id="f-quoteNumber" value="${Utils.escHtml(q.quoteNumber)}" oninput="QuoteEditor._set('quoteNumber',this.value)" />
+                </div>
+                <div class="form-group">
+                  <label>Status</label>
+                  <select id="f-status" onchange="QuoteEditor._set('status',this.value)">
+                    <option value="draft"    ${q.status==='draft'    ?'selected':''}>Draft</option>
+                    <option value="sent"     ${q.status==='sent'     ?'selected':''}>Sent</option>
+                    <option value="accepted" ${q.status==='accepted' ?'selected':''}>Accepted</option>
+                    <option value="declined" ${q.status==='declined' ?'selected':''}>Declined</option>
+                    <option value="expired"  ${q.status==='expired'  ?'selected':''}>Expired</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Issue Date</label>
+                  <input type="date" id="f-issueDate" value="${q.issueDate || ''}" onchange="QuoteEditor._set('issueDate',this.value)" />
+                </div>
+                <div class="form-group">
+                  <label>Valid Until</label>
+                  <input type="date" id="f-validUntil" value="${q.validUntil || ''}" onchange="QuoteEditor._set('validUntil',this.value)" />
+                </div>
+                <div class="form-group">
+                  <label>${Utils.escHtml(settings.taxLabel)} Rate (applied to subtotal)</label>
+                  <input type="number" id="f-taxRate" min="0" max="100" step="0.5" value="${q.taxRate ?? 0}" oninput="QuoteEditor._set('taxRate',parseFloat(this.value)||0); QuoteEditor._refreshTotals()" />
+                </div>
+              </div>
+            </div>
+
+            <!-- Line Items -->
+            <div class="editor-section">
+              <h2 class="section-title">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                Deliverables & Line Items
+              </h2>
+              <div class="items-table">
+                <div class="items-header">
+                  <span>Description / Deliverable</span>
+                  <span style="text-align:center">Qty</span>
+                  <span>Unit Price</span>
+                  <span style="text-align:right">Line Total</span>
+                  <span></span>
+                </div>
+                <div id="items-container">
+                  ${q.items.map((item, idx) => this._renderItemRow(item, idx, settings)).join('')}
+                </div>
+              </div>
+              <button class="btn btn-add-item" onclick="QuoteEditor.addItem()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Add Line Item
+              </button>
+            </div>
+
+            <!-- Notes -->
+            <div class="editor-section">
+              <h2 class="section-title">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                Notes & Terms
+              </h2>
+              <div class="form-group">
+                <label>Terms, bank details, or any notes for the client</label>
+                <textarea id="f-notes" rows="6" placeholder="This quotation is valid for 30 days..." oninput="QuoteEditor._set('notes',this.value)">${Utils.escHtml(q.notes)}</textarea>
+              </div>
+            </div>
+
+          </div><!-- /editor-main -->
+
+          <!-- Sidebar: Totals -->
+          <div class="editor-sidebar">
+            <div class="totals-card" id="totals-card">
+              ${this._renderTotals(settings)}
+            </div>
+          </div>
+        </div>
+      </div>`;
+  },
+
+  _renderItemRow(item, idx, settings) {
+    if (!settings) settings = Storage.getSettings();
+    const lineTotal = parseFloat(item.quantity || 0) * parseFloat(item.unitPrice || 0);
+    const canRemove = this._quote.items.length > 1;
+    return `
+      <div class="item-row" data-idx="${idx}">
+        <div class="item-description">
+          <input type="text" placeholder="e.g. Logo Design, Social Media Content..." value="${Utils.escHtml(item.description || '')}"
+            oninput="QuoteEditor.updateItem(${idx},'description',this.value)" />
+        </div>
+        <div class="item-qty">
+          <input type="number" min="0" step="0.5" value="${item.quantity}"
+            oninput="QuoteEditor.updateItem(${idx},'quantity',this.value)" />
+        </div>
+        <div class="item-price">
+          <div class="input-with-prefix">
+            <span>${settings.currencySymbol}</span>
+            <input type="number" min="0" step="0.01" value="${item.unitPrice}"
+              oninput="QuoteEditor.updateItem(${idx},'unitPrice',this.value)" />
+          </div>
+        </div>
+        <div class="item-total">
+          <span id="line-total-${idx}">${Utils.formatCurrency(lineTotal, settings)}</span>
+        </div>
+        <div class="item-actions">
+          <button class="icon-btn icon-btn-danger" onclick="QuoteEditor.removeItem(${idx})" ${canRemove ? '' : 'disabled'} title="Remove">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>`;
+  },
+
+  _renderTotals(settings) {
+    if (!settings) settings = Storage.getSettings();
+    const q       = this._quote;
+    const totals  = Utils.calculateTotals(q.items || [], q.discountType, q.discountValue, q.taxRate);
+    const taxLabel = `${settings.taxLabel} (${q.taxRate || 0}%)`;
+    return `
+      <h3>Quotation Summary</h3>
+      <div class="totals-rows">
+        <div class="totals-row">
+          <span>Subtotal</span>
+          <span>${Utils.formatCurrency(totals.subtotal, settings)}</span>
+        </div>
+        <div class="totals-row">
+          <span>${Utils.escHtml(taxLabel)}</span>
+          <span>${Utils.formatCurrency(totals.taxAmount, settings)}</span>
+        </div>
+
+        <!-- Discount -->
+        <div class="totals-row discount-row">
+          <div class="discount-control">
+            <span>Discount</span>
+            <div class="discount-type-toggle">
+              <button class="${q.discountType==='percentage'?'active':''}" onclick="QuoteEditor.setDiscountType('percentage')">%</button>
+              <button class="${q.discountType==='fixed'?'active':''}" onclick="QuoteEditor.setDiscountType('fixed')">${settings.currencySymbol}</button>
+            </div>
+            <input type="number" min="0" step="${q.discountType==='percentage'?'0.5':'0.01'}"
+              value="${q.discountValue || 0}"
+              oninput="QuoteEditor._set('discountValue', parseFloat(this.value)||0); QuoteEditor._refreshTotals()"
+              style="width:80px;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-primary);font-size:13px;outline:none" />
+          </div>
+          <span>-${Utils.formatCurrency(totals.discountAmount, settings)}</span>
+        </div>
+
+        <div class="totals-divider"></div>
+        <div class="totals-total">
+          <span>TOTAL ${settings.currency}</span>
+          <span>${Utils.formatCurrency(totals.total, settings)}</span>
+        </div>
+      </div>
+
+      <div style="margin-top:20px;display:flex;flex-direction:column;gap:8px">
+        <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="QuoteEditor.saveAndPreview()">
+          <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          Preview Quotation
+        </button>
+        <button class="btn btn-ghost" style="width:100%;justify-content:center" onclick="QuoteEditor.save('draft',true)">Save Draft</button>
+      </div>`;
+  },
+
+  _newItem() {
+    return { id: Utils.generateId(), description: '', quantity: 1, unitPrice: 0 };
+  },
+
+  _set(field, value) {
+    if (this._quote) {
+      this._quote[field] = value;
+      this._quote.updatedAt = new Date().toISOString();
+    }
+  },
+
+  updateItem(idx, field, value) {
+    const item = this._quote.items[idx];
+    if (!item) return;
+    item[field] = field === 'description' ? value : (parseFloat(value) || 0);
+    this._quote.updatedAt = new Date().toISOString();
+
+    const lineTotal = item.quantity * item.unitPrice;
+    const settings  = Storage.getSettings();
+    const el        = document.getElementById(`line-total-${idx}`);
+    if (el) el.textContent = Utils.formatCurrency(lineTotal, settings);
+
+    this._refreshTotals();
+  },
+
+  addItem() {
+    const settings = Storage.getSettings();
+    const item     = this._newItem();
+    this._quote.items.push(item);
+    const container = document.getElementById('items-container');
+    if (container) {
+      const idx = this._quote.items.length - 1;
+      container.insertAdjacentHTML('beforeend', this._renderItemRow(item, idx, settings));
+    }
+    this._refreshTotals();
+  },
+
+  removeItem(idx) {
+    if (this._quote.items.length <= 1) return;
+    this._quote.items.splice(idx, 1);
+    const settings  = Storage.getSettings();
+    const container = document.getElementById('items-container');
+    if (container) {
+      container.innerHTML = this._quote.items.map((item, i) => this._renderItemRow(item, i, settings)).join('');
+    }
+    this._refreshTotals();
+  },
+
+  setDiscountType(type) {
+    this._quote.discountType  = type;
+    this._quote.discountValue = 0;
+    this._refreshTotals();
+  },
+
+  _refreshTotals() {
+    const card = document.getElementById('totals-card');
+    if (card) card.innerHTML = this._renderTotals();
+  },
+
+  _validate() {
+    if (!this._quote.clientName?.trim()) {
+      Toast.show('Please enter a client name', 'error');
+      document.getElementById('f-clientName')?.focus();
+      return false;
+    }
+    const hasDescription = this._quote.items.some(i => i.description?.trim());
+    if (!hasDescription) {
+      Toast.show('Please add at least one deliverable with a description', 'error');
+      return false;
+    }
+    return true;
+  },
+
+  save(status, showToast) {
+    if (status) this._quote.status = status;
+    this._quote.updatedAt = new Date().toISOString();
+
+    if (this._isNew) {
+      const settings = Storage.getSettings();
+      settings.nextQuoteNumber = (settings.nextQuoteNumber || 1) + 1;
+      Storage.saveSettings(settings);
+      this._isNew = false;
+    }
+
+    Storage.saveQuotation(this._quote);
+    if (showToast) Toast.show('Quotation saved');
+    return true;
+  },
+
+  saveAndPreview() {
+    if (!this._validate()) return;
+    this.save(null, false);
+    Router.navigate(`quote-preview/${this._quote.id}`);
+  },
+};
+
+// ============================================================
+// QUOTE PREVIEW VIEW
+// ============================================================
+const QuotePreview = {
+  _quote: null,
+
+  render(id) {
+    this._quote = Storage.getQuotation(id);
+    if (!this._quote) { Router.navigate('quotations'); return; }
+
+    const settings = Storage.getSettings();
+    const totals   = Utils.calculateTotals(
+      this._quote.items || [], this._quote.discountType, this._quote.discountValue,
+      this._quote.taxRate ?? settings.defaultTaxRate
+    );
+
+    const convertedNotice = this._quote.convertedInvoiceId ? `
+      <button class="btn btn-ghost" onclick="Router.navigate('preview/${this._quote.convertedInvoiceId}')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+        View Invoice
+      </button>` : `
+      <button class="btn btn-primary" onclick="QuotePreview.confirmConvert()">
+        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        Convert to Invoice
+      </button>`;
+
+    document.getElementById('app-main').innerHTML = `
+      <div class="view-preview">
+        <!-- Toolbar -->
+        <div class="preview-toolbar no-print">
+          <div style="display:flex;align-items:center;gap:12px">
+            <button class="btn btn-ghost" onclick="Router.back()">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              Back
+            </button>
+            <span class="status-badge status-${this._quote.status}">${this._quote.status}</span>
+            <span style="color:var(--text-muted);font-size:14px">${Utils.escHtml(this._quote.quoteNumber)}</span>
+          </div>
+          <div class="preview-actions">
+            <select class="status-select" onchange="QuotePreview.updateStatus(this.value)">
+              <option value="" disabled selected>Change status...</option>
+              <option value="draft">Draft</option>
+              <option value="sent">Sent</option>
+              <option value="accepted">✓ Mark as Accepted</option>
+              <option value="declined">Declined</option>
+              <option value="expired">Expired</option>
+            </select>
+            <button class="btn btn-ghost" onclick="Router.navigate('quote-editor/${this._quote.id}')">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              Edit
+            </button>
+            ${convertedNotice}
+            <button class="btn btn-primary" onclick="QuotePreview.printQuote()">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+              Export PDF
+            </button>
+          </div>
+        </div>
+
+        <!-- Quotation Paper -->
+        <div class="invoice-paper">
+          ${this._renderTemplate(this._quote, settings, totals)}
+        </div>
+      </div>`;
+  },
+
+  _renderTemplate(quote, settings, totals) {
+    const accent = settings.accentColor || '#7c3aed';
+    const gold   = settings.accentColorSecondary || '#f59e0b';
+
+    const logoHtml = settings.logoUrl
+      ? `<img src="${settings.logoUrl}" alt="${Utils.escHtml(settings.agencyName)}" class="inv-logo" />`
+      : `<div class="inv-logo-text" style="background:linear-gradient(135deg,${accent},${gold})">${settings.agencyName.slice(0,2).toUpperCase()}</div>`;
+
+    const statusStyles = {
+      draft:    { bg:'#f1f5f9', color:'#64748b' },
+      sent:     { bg:'#dbeafe', color:'#1d4ed8' },
+      accepted: { bg:'#dcfce7', color:'#16a34a' },
+      declined: { bg:'#fee2e2', color:'#dc2626' },
+      expired:  { bg:'#f1f5f9', color:'#64748b' },
+    };
+    const ss = statusStyles[quote.status] || statusStyles.draft;
+
+    const itemRows = (quote.items || []).map((item, i) => {
+      const lineTotal = parseFloat(item.quantity || 0) * parseFloat(item.unitPrice || 0);
+      return `
+        <tr class="inv-tr${i%2===1?' inv-tr-alt':''}">
+          <td class="inv-td inv-td-desc">${Utils.escHtml(item.description) || '—'}</td>
+          <td class="inv-td inv-td-num">${item.quantity}</td>
+          <td class="inv-td inv-td-num">${Utils.formatCurrency(item.unitPrice, settings)}</td>
+          <td class="inv-td inv-td-num" style="font-weight:700">${Utils.formatCurrency(lineTotal, settings)}</td>
+        </tr>`;
+    }).join('');
+
+    return `
+      <div class="invoice-doc invoice-doc-dark" style="--inv-accent:${accent};--inv-gold:${gold}">
+        <!-- Original abstract banner artwork -->
+        <div class="inv-header">
+          <img src="/assets/invoice-wave.png" alt="" class="inv-artwork" onerror="this.remove();this.parentElement.classList.add('inv-header-fallback')" />
+        </div>
+
+        <div class="inv-title-row">
+          <div class="inv-title-brand">
+            ${logoHtml}
+            <div class="inv-brand-info">
+              <span class="inv-agency-name">${Utils.escHtml(settings.agencyName)}</span>
+              ${settings.agencyTagline ? `<span class="inv-agency-tagline">${Utils.escHtml(settings.agencyTagline)}</span>` : ''}
+            </div>
+          </div>
+          <div class="inv-title-block">
+            <div class="inv-number">${Utils.escHtml(quote.quoteNumber)}</div>
+            <div class="inv-status-badge" style="background:${ss.bg};color:${ss.color}">${quote.status.toUpperCase()}</div>
+          </div>
+          <div class="inv-title">QUOTATION</div>
+        </div>
+
+        <!-- Bill To / From / Dates -->
+        <div class="inv-info-row">
+          <div class="inv-info-block">
+            <div class="inv-info-label">From</div>
+            <div class="inv-info-name">${Utils.escHtml(settings.agencyName)}</div>
+            ${settings.agencyAddress ? `<div class="inv-info-detail" style="white-space:pre-line;margin-top:4px">${Utils.escHtml(settings.agencyAddress)}</div>` : ''}
+            ${settings.agencyEmail   ? `<div class="inv-info-detail">${Utils.escHtml(settings.agencyEmail)}</div>` : ''}
+            ${settings.agencyPhone   ? `<div class="inv-info-detail">${Utils.escHtml(settings.agencyPhone)}</div>` : ''}
+            ${settings.agencyWebsite ? `<div class="inv-info-detail">${Utils.escHtml(settings.agencyWebsite)}</div>` : ''}
+          </div>
+          <div class="inv-info-block">
+            <div class="inv-info-label">Quoted To</div>
+            <div class="inv-info-name">${Utils.escHtml(quote.clientName) || '—'}</div>
+            ${quote.clientCompany ? `<div class="inv-info-company">${Utils.escHtml(quote.clientCompany)}</div>` : ''}
+            ${quote.clientEmail   ? `<div class="inv-info-detail">${Utils.escHtml(quote.clientEmail)}</div>` : ''}
+            ${quote.clientAddress ? `<div class="inv-info-detail" style="white-space:pre-line;margin-top:4px">${Utils.escHtml(quote.clientAddress)}</div>` : ''}
+          </div>
+          <div class="inv-dates-block">
+            ${quote.projectName ? `
+              <div class="inv-date-row">
+                <span class="inv-date-label">Project</span>
+                <span class="inv-date-value">${Utils.escHtml(quote.projectName)}</span>
+              </div>` : ''}
+            <div class="inv-date-row">
+              <span class="inv-date-label">Issue Date</span>
+              <span class="inv-date-value">${Utils.formatDate(quote.issueDate)}</span>
+            </div>
+            <div class="inv-date-row">
+              <span class="inv-date-label">Valid Until</span>
+              <span class="inv-date-value">${Utils.formatDate(quote.validUntil)}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Items Table -->
+        <table class="inv-table">
+          <thead>
+            <tr>
+              <th class="inv-th inv-th-desc">Description</th>
+              <th class="inv-th inv-th-num">Qty</th>
+              <th class="inv-th inv-th-num">Unit Price</th>
+              <th class="inv-th inv-th-num">Amount</th>
+            </tr>
+          </thead>
+          <tbody>${itemRows}</tbody>
+        </table>
+
+        <div class="inv-settlement">
+          <!-- Notes -->
+          ${quote.notes ? `
+          <div class="inv-notes">
+            <div class="inv-notes-label">Terms & Notes</div>
+            <div class="inv-notes-content" style="white-space:pre-line">${Utils.escHtml(quote.notes)}</div>
+          </div>` : '<div></div>'}
+
+          <!-- Totals -->
+          <div class="inv-totals-container">
+            <div class="inv-totals">
+            <div class="inv-totals-row">
+              <span>Subtotal</span>
+              <span>${Utils.formatCurrency(totals.subtotal, settings)}</span>
+            </div>
+            ${totals.taxAmount > 0 ? `
+            <div class="inv-totals-row">
+              <span>${Utils.escHtml(settings.taxLabel)} (${quote.taxRate ?? settings.defaultTaxRate ?? 0}%)</span>
+              <span>${Utils.formatCurrency(totals.taxAmount, settings)}</span>
+            </div>` : ''}
+            ${totals.discountAmount > 0 ? `
+            <div class="inv-totals-row" style="color:#dc2626">
+              <span>Discount</span>
+              <span>-${Utils.formatCurrency(totals.discountAmount, settings)}</span>
+            </div>` : ''}
+            <div class="inv-totals-divider"></div>
+            <div class="inv-totals-total">
+              <span>TOTAL ${settings.currency}</span>
+              <span>${Utils.formatCurrency(totals.total, settings)}</span>
+            </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="inv-footer">
+          <div class="inv-footer-left">This quotation does not constitute a tax invoice.</div>
+          <div class="inv-footer-right">${Utils.escHtml(settings.agencyWebsite || settings.agencyEmail || '')}</div>
+        </div>
+      </div>`;
+  },
+
+  updateStatus(status) {
+    if (!status || !this._quote) return;
+    this._quote.status = status;
+    this._quote.updatedAt = new Date().toISOString();
+    Storage.saveQuotation(this._quote);
+    Toast.show(`Status updated to "${status}"`);
+    this.render(this._quote.id);
+  },
+
+  confirmConvert() {
+    Modal.show({
+      title:       'Convert to Invoice',
+      body:        `<p>This will create a new draft invoice using this quotation's client details and line items.<br>The quotation itself will still not count toward your invoice totals — only the new invoice will.</p>`,
+      confirmText: 'Create Invoice',
+      onConfirm:   () => this.convertToInvoice(),
+    });
+  },
+
+  convertToInvoice() {
+    const quote    = this._quote;
+    const settings = Storage.getSettings();
+
+    const invoice = {
+      id:            Utils.generateId(),
+      invoiceNumber: Utils.generateInvoiceNumber(settings),
+      status:        'draft',
+      clientName:    quote.clientName,
+      clientCompany: quote.clientCompany,
+      clientEmail:   quote.clientEmail,
+      clientAddress: quote.clientAddress,
+      projectName:   quote.projectName,
+      issueDate:     Utils.today(),
+      dueDate:       Utils.addDays(Utils.today(), 30),
+      items:         JSON.parse(JSON.stringify(quote.items)),
+      discountType:  quote.discountType,
+      discountValue: quote.discountValue,
+      taxRate:       quote.taxRate,
+      notes:         quote.notes,
+      createdAt:     new Date().toISOString(),
+      updatedAt:     new Date().toISOString(),
+    };
+
+    settings.nextInvoiceNumber = (settings.nextInvoiceNumber || 1) + 1;
+    Storage.saveSettings(settings);
+    Storage.saveInvoice(invoice);
+
+    quote.convertedInvoiceId = invoice.id;
+    if (quote.status === 'draft' || quote.status === 'sent') quote.status = 'accepted';
+    quote.updatedAt = new Date().toISOString();
+    Storage.saveQuotation(quote);
+
+    Toast.show('Invoice created from quotation');
+    Router.navigate(`editor/${invoice.id}`);
+  },
+
+  printQuote() {
+    window.print();
+  },
+};
+
+// ============================================================
 // SETTINGS VIEW
 // ============================================================
 const Settings = {
@@ -2237,12 +3149,15 @@ function initApp() {
   if (navName) navName.textContent = settings.agencyName;
 
   Router
-    .on('dashboard', ()   => Overview.render())
-    .on('invoices',  ()   => Dashboard.render())
-    .on('editor',    (id) => Editor.render(id || 'new'))
-    .on('preview',   (id) => Preview.render(id))
-    .on('expenses',  ()   => Expenses.render())
-    .on('settings',  ()   => Settings.render())
+    .on('dashboard',     ()   => Overview.render())
+    .on('invoices',      ()   => Dashboard.render())
+    .on('editor',        (id) => Editor.render(id || 'new'))
+    .on('preview',       (id) => Preview.render(id))
+    .on('quotations',    ()   => Quotations.render())
+    .on('quote-editor',  (id) => QuoteEditor.render(id || 'new'))
+    .on('quote-preview', (id) => QuotePreview.render(id))
+    .on('expenses',      ()   => Expenses.render())
+    .on('settings',      ()   => Settings.render())
     .init();
 }
 
