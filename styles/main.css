@@ -312,6 +312,9 @@ ul { list-style: none; }
 .status-sent    { background: var(--status-sent-bg);    color: var(--status-sent); }
 .status-paid    { background: var(--status-paid-bg);    color: var(--status-paid); }
 .status-overdue { background: var(--status-overdue-bg); color: var(--status-overdue); }
+.status-accepted { background: var(--status-paid-bg);    color: var(--status-paid); }
+.status-declined { background: var(--status-overdue-bg); color: var(--status-overdue); }
+.status-expired  { background: var(--status-draft-bg);   color: var(--status-draft); }
 
 /* ============================================================
    FORM ELEMENTS
